@@ -5,6 +5,7 @@
         "jsx": "react",
         "outDir": "dist",
         "declaration": true,
-        "strict": true
+        "strict": true,
+        "sourceMap": true
     }
 }

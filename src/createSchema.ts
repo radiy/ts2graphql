@@ -18,21 +18,22 @@ import {
     GraphQLUnionType,
     GraphQLError,
     Kind,
+    GraphQLArgumentConfig,
 } from 'graphql';
 import * as ts from 'typescript';
-import {DateType} from './date';
-import {typeAST, AllTypes, Interface, Primitive, Union, InterfaceLiteral, UnionLiteral} from 'ts-type-ast';
+import { DateType } from './date';
+import { typeAST, AllTypes, Interface, Primitive, Union, InterfaceLiteral, UnionLiteral } from 'ts-type-ast';
 
 type CustomScalarFactory = (type: Primitive) => GraphQLScalarType | undefined;
 export function createSchema(
     fileName: string,
-    options: {customScalars?: GraphQLScalarType[]; customScalarFactory?: CustomScalarFactory} = {},
+    options: { customScalars?: GraphQLScalarType[]; customScalarFactory?: CustomScalarFactory } = {},
 ) {
     const customScalarsMap = new Map<string, GraphQLScalarType>();
     (options.customScalars || []).forEach(value => customScalarsMap.set(value.name, value));
     const customScalar = options.customScalarFactory;
 
-    const program = ts.createProgram({options: {strict: true}, rootNames: [fileName]});
+    const program = ts.createProgram({ options: { strict: true }, rootNames: [fileName] });
     const checker = program.getTypeChecker();
     const sourceFile = program.getSourceFile(fileName)!;
     //@ts-ignore
@@ -42,6 +43,7 @@ export function createSchema(
 
     const schema = createSchemaFromTypes();
     return schema;
+    
 
     function createSchemaFromTypes() {
         let query!: GraphQLObjectType;
@@ -60,7 +62,7 @@ export function createSchema(
                 }
             }
         }
-        if (!(query||mutation)) throw new Error("No 'Query' or 'Mutation' type found");
+        if (!(query || mutation)) throw new Error("No 'Query' or 'Mutation' type found");
         return new GraphQLSchema({
             query: query,
             mutation: mutation,
@@ -94,6 +96,8 @@ export function createSchema(
                 if (type.name === 'Date') {
                     return nonNull(DateType);
                 }
+                if (type.name == "Promise" && type.generics.length == 1)
+                    return createGQL(type.generics[0], isInput)
                 throw new Error('Unexpected type: ' + type.name);
             case 'primitive':
                 return add(type, createGQLPrimitive(type));
@@ -130,23 +134,36 @@ export function createSchema(
         });
         add(type, gqlType);
         type.members.reduce((obj, member) => {
+            let args: GraphQLFieldConfigArgumentMap | undefined = undefined
+            if (member.args) {
+                if (member.args.length === 1 && member.args[0].type.kind === "interfaceLiteral") {
+                    args = member.args[0].type.members.reduce(
+                        (acc, arg) => {
+                            acc[arg.name] = {
+                                description: arg.doc,
+                                defaultValue: undefined,
+                                type: nullable(arg.orNull, createGQL(arg.type, true)) as GraphQLInputType,
+                            };
+                            return acc;
+                        },
+                        {} as GraphQLFieldConfigArgumentMap
+                    )
+                }
+                else {
+                    args = {}
+                    for(let arg of member.args) {
+                        args[arg.name] = {
+                            description: arg.doc,
+                            defaultValue: undefined,
+                            type: nullable(arg.orNull || arg.orUndefined, createGQL(arg.type, true)) as GraphQLInputType,
+                        }
+                    }
+                }
+            }
             // if (member.orUndefined) throw new Error('Undefined props are not supported in graphql');
             const memberType = {
-                type: nullable(member.orNull||member.orUndefined, createGQL(member.type, false)) as GraphQLOutputType,
-                args:
-                    member.args && member.args.length === 1
-                        ? (member.args[0].type as InterfaceLiteral).members.reduce(
-                              (acc, arg) => {
-                                  acc[arg.name] = {
-                                      description: arg.doc,
-                                      defaultValue: undefined,
-                                      type: nullable(arg.orNull, createGQL(arg.type, true)) as GraphQLInputType,
-                                  };
-                                  return acc;
-                              },
-                              {} as GraphQLFieldConfigArgumentMap,
-                          )
-                        : undefined,
+                type: nullable(member.orNull || member.orUndefined, createGQL(member.type, isInput)) as GraphQLOutputType,
+                args: args,
                 // todo:
                 deprecationReason: undefined,
                 description: member.doc,
@@ -169,8 +186,8 @@ export function createSchema(
         if (!type.members.every(m => m.kind === 'primitive' && m.type === 'string'))
             throw new Error('Input union supports only string unions');
         const union = type.members.map(m => m.kind === 'primitive' && m.literal);
-        const validate = (val: string) => {
-            if (!union.includes(val))
+        const validate = (val: unknown) => {
+            if (typeof val === "string" && !union.includes(val))
                 throw new GraphQLError(`Input union: "${union.join(' | ')}" doesn't have value: ${val}`);
             return val;
         };
